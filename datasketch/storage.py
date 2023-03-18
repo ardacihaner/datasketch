@@ -914,6 +914,35 @@ if redis is not None:
                 self.execute()
             super(RedisBuffer, self).execute_command(*args, **kwargs)
 
+    class RedisClusterBuffer(redis.cluster.ClusterPipeline):
+        '''A bufferized version of `redis.cluster.ClusterPipeline`.
+        This is a copy of the RedisBuffer class, but for RedisCluster.
+
+        The only difference from the conventional pipeline object is the
+        ``_buffer_size``. Once the buffer is longer than the buffer size,
+        the pipeline is automatically executed, and the buffer cleared.
+        '''
+
+        def __init__(self, nodes_manager, commands_parser, cluster_response_callbacks, buffer_size,
+                     shard_hint=None):
+            self._buffer_size = buffer_size
+            super(RedisClusterBuffer, self).__init__(
+                nodes_manager, commands_parser, cluster_response_callbacks,
+                shard_hint=shard_hint)
+
+        @property
+        def buffer_size(self):
+            return self._buffer_size
+
+        @buffer_size.setter
+        def buffer_size(self, value):
+            self._buffer_size = value
+
+        def execute_command(self, *args, **kwargs):
+            if len(self.command_stack) >= self._buffer_size:
+                self.execute()
+            super(RedisClusterBuffer, self).execute_command(*args, **kwargs)
+
 
     class RedisStorage:
         '''Base class for Redis-based storage containers.
@@ -939,6 +968,18 @@ if redis is not None:
                         },
                         'redis_buffer': {'transaction': True}
                     }
+                
+                optionally, if you want to use a Redis cluster, you can specify it with "cluster" key.
+                The value of host will be the nodes manager of the cluster.
+                
+                    storage_config={
+                        'type': 'redis',
+                        'redis': {
+                            'cluster': True,
+                            'host': 'nodes_manager', 
+                            'port': 6379
+                        },
+                    }
 
             name (bytes, optional): A prefix to namespace all keys in
                 the database pertaining to this storage container.
@@ -949,12 +990,26 @@ if redis is not None:
             self.config = config
             self._buffer_size = 50000
             redis_param = self._parse_config(self.config['redis'])
-            self._redis = redis.Redis(**redis_param)
+            cluster_mode = redis_param.pop('cluster', False)
+            if cluster_mode:
+                self._redis = redis.RedisCluster(**redis_param)
+            else:
+                self._redis = redis.Redis(**redis_param)
             redis_buffer_param = self._parse_config(self.config.get('redis_buffer', {}))
-            self._buffer = RedisBuffer(self._redis.connection_pool,
-                                       self._redis.response_callbacks,
-                                       transaction=redis_buffer_param.get('transaction', True),
-                                       buffer_size=self._buffer_size)
+            if cluster_mode:
+                self._buffer = RedisClusterBuffer(
+                    self._redis.nodes_manager,
+                    self._redis.commands_parser,
+                    cluster_response_callbacks=self._redis.cluster_response_callbacks,
+                    buffer_size=self._buffer_size,
+                )
+            else:
+                self._buffer = RedisBuffer(
+                    self._redis.connection_pool,
+                    self._redis.response_callbacks,
+                    transaction=redis_buffer_param.get("transaction", True),
+                    buffer_size=self._buffer_size,
+                )
             if name is None:
                 name = _random_name(11)
             self._name = name
@@ -1074,8 +1129,12 @@ if redis is not None:
         def has_key(self, key):
             return self._redis.hexists(self._name, key)
 
-        def empty_buffer(self):
-            self._buffer.execute()
+        def empty_buffer(self) -> None:
+            try:
+                self._buffer.execute()
+            except TypeError:
+                # If the buffer is empty, we get a TypeError for ClusterBuffer
+                pass
             # To avoid broken pipes, recreate the connection
             # objects upon emptying the buffer
             self.__init__(self.config, name=self._name)
