@@ -277,9 +277,9 @@ if cassandra is not None:
                         cluster = c_cluster.Cluster(
                             seeds,
                             auth_provider=c_auth.PlainTextAuthProvider(
-                                username=kwargs.get("username"),
-                                password=kwargs.get("password"),
-                            ),
+                                username=kwargs["auth"]["username"],
+                                password=kwargs["auth"]["password"],                            
+                             ),
                         )
                     else:
                         cluster = c_cluster.Cluster(seeds)
